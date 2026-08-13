@@ -1,0 +1,9 @@
+# 备份与日志
+*.bak*
+*.log
+ogproxy-requests.log
+ogproxy-upstream.log
+
+# 运行时产物
+__pycache__/
+*.pyc
