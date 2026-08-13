@@ -15,12 +15,21 @@ API key 获取、模型注册、工具启用、联网沙箱、超时回退策略
 
 ## 环境要求
 
-- Windows(脚本基于 PowerShell 5.1)
+### Windows(脚本基于 PowerShell 5.1)
+
 - Python 3(转换代理 `ogproxy.py` 运行在本地 127.0.0.1:8765)
 - Codex 桌面应用或 CLI
 - opencode(用于获取/存放 OpenCode Go 订阅的 API key)
 
+### macOS
+
+- macOS(脚本基于 bash + python3,系统自带)
+- Codex 桌面应用或 CLI(CLI 自动识别 PATH 或 `/Applications/ChatGPT.app/Contents/Resources/codex`)
+- opencode(用于获取/存放 OpenCode Go 订阅的 API key)
+
 ## 快速开始
+
+### Windows
 
 1. 把本目录拷贝到目标机器(如 `C:\Users\<你>\scripts\opencode-to-codex\`)
 2. 双击 **`go-to-codex.bat`**
@@ -32,13 +41,28 @@ API key 获取、模型注册、工具启用、联网沙箱、超时回退策略
 
 切回 ChatGPT:双击 **`back-to-chatgpt.bat`**(保留 provider 配置,可随时切回)。
 
+### macOS
+
+1. 把本目录拷贝到目标机器(如 `~/opencode-go-codex-bridge/`)
+2. 运行 **`./go-to-codex.sh`**(或双击 **`go-to-codex.command`**)
+   - 自动从 `~/.local/share/opencode/auth.json` 读取 OpenCode Go 的 key
+   - 若检测不到,会自动打开 `https://opencode.ai/auth`,粘贴 API key(`sk-` 开头)即可
+   - 自动启动转换代理 → 写入 `~/.codex/config.toml` → 用 codex CLI 发测试消息验证
+3. 完全退出并重新打开 Codex 桌面应用(新配置对新聊天生效)
+4. 开始使用:模型为 DeepSeek V4 Pro,支持工具调用与联网
+
+切回 ChatGPT:运行 **`./back-to-chatgpt.sh`**(或双击 `back-to-chatgpt.command`,保留 provider 配置,可随时切回)。
+
 ## 文件说明
 
 | 文件 | 作用 |
 |---|---|
-| `go-to-codex.bat` / `.ps1` | 一键:获取 key → 验证订阅 → 启动代理 → 写配置 → CLI 验证 |
-| `back-to-chatgpt.bat` / `.ps1` | 切回 `gpt-5.6-sol`(保留 opencode-go provider 配置) |
-| `common.ps1` | 共享逻辑:key 获取/保存、config.toml 编辑(容错混合行尾)、代理启动 |
+| `go-to-codex.bat` / `.ps1` | Windows 一键:获取 key → 验证订阅 → 启动代理 → 写配置 → CLI 验证 |
+| `back-to-chatgpt.bat` / `.ps1` | Windows 切回 `gpt-5.6-sol`(保留 opencode-go provider 配置) |
+| `common.ps1` | Windows 共享逻辑:key 获取/保存、config.toml 编辑(容错混合行尾)、代理启动 |
+| `go-to-codex.sh` / `.command` | macOS 一键(对应 .bat/.ps1) |
+| `back-to-chatgpt.sh` / `.command` | macOS 切回(对应 .bat/.ps1) |
+| `common.sh` | macOS 共享逻辑(对应 common.ps1,bash + 内嵌 python3 编辑 config.toml) |
 | `ogproxy.py` | 本地转换代理:模型注册表 + Responses→Chat 翻译(流式/非流式、工具调用合并、思考内容回传) |
 
 ## 工作原理
