@@ -82,6 +82,23 @@ API key 获取、模型注册、工具启用、联网沙箱、超时回退策略
 3. **思考内容闭环**:DeepSeek 思考型模型要求历史中的 assistant 消息携带 `reasoning_content`。代理从流中捕获,以 reasoning 项发送给 codex,下轮自动回传。
 4. **注册表**:代理的 `/v1/models` 返回完整模型元数据(`use_responses_lite=false`、`tool_mode=direct`、上下文窗口等),让 codex 以非 lite 模式运行,获得原生函数调用。
 
+## 隐私与调试
+
+- 代理默认**不会**把请求正文写入磁盘，避免提示词、工具参数或图片数据留在调试日志中。
+- 排障时可临时设置 `OPENCODE_GO_PROXY_DEBUG=1` 后重启代理。此模式会在 `~/.codex/` 下写入 `ogproxy-upstream.log` 和 `ogproxy-requests.log`，日志可能包含敏感内容；排障结束后请关闭该变量并删除不再需要的日志。
+- `ogproxy-config.json` 使用原子写入，模型热切换被中断时不会留下半写入配置；无效槽位会在下次启动时被忽略并回退到安全默认值。
+
+## 开发与验证
+
+项目只依赖 Python 标准库。提交前可运行：
+
+```bash
+python -m py_compile ogproxy.py
+python -m unittest discover -s tests -v
+```
+
+GitHub Actions 会在 Windows 与 macOS、Python 3.9 与 3.13 上运行同一组回归测试，并检查 PowerShell、bash 与 `.command` 脚本语法。
+
 ## 注意事项
 
 - 代理是本地单点,电脑重启后请先运行一次 `go-to-codex.bat`(会自动拉起代理)

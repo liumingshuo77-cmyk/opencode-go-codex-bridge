@@ -13,6 +13,7 @@
 import json
 import os
 import sys
+import threading
 import time
 import uuid
 import urllib.request
@@ -31,6 +32,12 @@ MAX_OUTPUT = 64000
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(SCRIPT_DIR, "ogproxy-config.json")
+CODEX_HOME = os.path.join(os.path.expanduser("~"), ".codex")
+DEBUG_LOGS = os.environ.get("OPENCODE_GO_PROXY_DEBUG", "").strip().lower() in (
+    "1", "true", "yes", "on"
+)
+CONFIG_LOCK = threading.RLock()
+LOG_LOCK = threading.Lock()
 
 # 订阅模型挂到 codex 已知模型名上(已知名才有工具注入)。
 # 应用模型选择器会显示这些条目,选中即切换,无需重启。
@@ -48,6 +55,13 @@ DEFAULT_SLOTS = {
 GATEWAY_NO_IMAGE = {"qwen3.7-plus", "qwen3.6-plus"}
 
 
+def _non_empty_string(value):
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value or None
+
+
 def load_config():
     try:
         with open(CONFIG_PATH, encoding="utf-8") as f:
@@ -56,11 +70,30 @@ def load_config():
         raw = {}
     slots = {}
     if isinstance(raw.get("slots"), dict):
-        slots = {k: dict(v) for k, v in raw["slots"].items() if isinstance(v, dict)}
+        for codex_slug, cfg in raw["slots"].items():
+            codex_slug = _non_empty_string(codex_slug)
+            if not codex_slug or not isinstance(cfg, dict):
+                continue
+            upstream_model = _non_empty_string(cfg.get("upstream_model"))
+            if not upstream_model:
+                continue
+            display_name = _non_empty_string(cfg.get("display_name")) or upstream_model
+            slots[codex_slug] = {
+                "upstream_model": upstream_model,
+                "display_name": display_name,
+            }
     if not slots:
         # 兼容旧格式(扁平 upstream_model/display_name)
-        um = raw.get("upstream_model") or os.environ.get("OPENCODE_GO_PROXY_UPSTREAM_MODEL", "deepseek-v4-pro")
-        dn = raw.get("display_name") or os.environ.get("OPENCODE_GO_PROXY_DISPLAY", "DeepSeek V4 Pro")
+        um = (
+            _non_empty_string(raw.get("upstream_model"))
+            or _non_empty_string(os.environ.get("OPENCODE_GO_PROXY_UPSTREAM_MODEL"))
+            or "deepseek-v4-pro"
+        )
+        dn = (
+            _non_empty_string(raw.get("display_name"))
+            or _non_empty_string(os.environ.get("OPENCODE_GO_PROXY_DISPLAY"))
+            or "DeepSeek V4 Pro"
+        )
         slots = {k: dict(v) for k, v in DEFAULT_SLOTS.items()}
         slots["gpt-5.6-sol"] = {"upstream_model": um, "display_name": dn}
     if "gpt-5.6-sol" not in slots:
@@ -72,17 +105,30 @@ SLOTS = load_config()
 
 
 def save_config():
+    """Atomically persist model slots so an interrupted write cannot corrupt startup."""
+    tmp_path = "%s.tmp.%s.%s" % (CONFIG_PATH, os.getpid(), threading.get_ident())
     try:
-        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-            json.dump({"slots": SLOTS}, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
+        with CONFIG_LOCK:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump({"slots": SLOTS}, f, ensure_ascii=False, indent=2)
+                f.write("\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, CONFIG_PATH)
+        return True
+    except Exception as e:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        sys.stderr.write("[proxy] save_config failed: %s\n" % e)
+        return False
 
 
 # codex 只给"已知模型"注入工具。已知模型名 -> 订阅真实模型 的映射(热切换时更新)。
 MODEL_MAP = {}
 for _cslug, _cfg in SLOTS.items():
-    MODEL_MAP[_cslug] = _cfg["upstream_model"]
+    MODEL_MAP[_cslug] = _cfg.get("upstream_model") or _cslug
 # 兜底:未配置的已知名直接透传
 MODEL_MAP.setdefault("gpt-5.6-sol", "deepseek-v4-pro")
 
@@ -743,12 +789,49 @@ class StreamTranslator:
         return False
 
 
-def _dump_chat_req(chat_req):
+def _append_debug_log(filename, line):
+    """Write diagnostics only when explicitly enabled; request bodies may be sensitive."""
+    if not DEBUG_LOGS:
+        return
     try:
-        with open(os.path.join(os.path.expanduser("~"), ".codex", "ogproxy-upstream.log"), "a", encoding="utf-8") as lf:
-            lf.write("%s %s\n" % (time.strftime("%Y-%m-%dT%H:%M:%S"), json.dumps(chat_req, ensure_ascii=False)))
-    except Exception:
-        pass
+        os.makedirs(CODEX_HOME, exist_ok=True)
+        with LOG_LOCK:
+            with open(os.path.join(CODEX_HOME, filename), "a", encoding="utf-8") as lf:
+                lf.write(line.rstrip("\n") + "\n")
+    except Exception as e:
+        sys.stderr.write("[proxy] debug log failed: %s\n" % e)
+
+
+def _dump_chat_req(chat_req):
+    _append_debug_log(
+        "ogproxy-upstream.log",
+        "%s %s" % (
+            time.strftime("%Y-%m-%dT%H:%M:%S"),
+            json.dumps(chat_req, ensure_ascii=False),
+        ),
+    )
+
+
+def _validate_switch_body(body):
+    if not isinstance(body, dict):
+        return None, "request body must be a JSON object"
+    codex_slug = _non_empty_string(body.get("codex_model")) or "gpt-5.6-sol"
+    upstream_model = _non_empty_string(body.get("upstream_model"))
+    display_name = _non_empty_string(body.get("display_name"))
+    if not upstream_model:
+        return None, "missing upstream_model"
+    for field, value in (
+        ("codex_model", codex_slug),
+        ("upstream_model", upstream_model),
+        ("display_name", display_name),
+    ):
+        if value is not None and (len(value) > 200 or any(ch in value for ch in "\r\n\0")):
+            return None, "invalid %s" % field
+    return {
+        "codex_model": codex_slug,
+        "upstream_model": upstream_model,
+        "display_name": display_name or upstream_model,
+    }, None
 
 
 def _upstream_open(chat_req, attempts=2, backoff=1.0):
@@ -904,21 +987,23 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_switch(self, body):
         global PAYLOAD, MODEL_MAP
-        cslug = body.get("codex_model") or "gpt-5.6-sol"
-        up = body.get("upstream_model")
-        if not up or not isinstance(up, str):
-            self._send_json(400, {"error": {"message": "missing upstream_model"}})
+        switch, error = _validate_switch_body(body)
+        if error:
+            self._send_json(400, {"error": {"message": error}})
             return
-        slot = SLOTS.setdefault(cslug, {"upstream_model": up})
-        slot["upstream_model"] = up
-        if body.get("display_name"):
-            slot["display_name"] = body["display_name"]
-        MODEL_MAP[cslug] = up
-        PAYLOAD = build_payload()
-        save_config()
+        cslug = switch["codex_model"]
+        up = switch["upstream_model"]
+        with CONFIG_LOCK:
+            slot = SLOTS.setdefault(cslug, {"upstream_model": up})
+            slot["upstream_model"] = up
+            slot["display_name"] = switch["display_name"]
+            MODEL_MAP[cslug] = up
+            PAYLOAD = build_payload()
+            persisted = save_config()
         sys.stderr.write("[proxy] switched slot %s -> %s\n" % (cslug, up))
         self._send_json(200, {
             "ok": True,
+            "persisted": persisted,
             "codex_model": cslug,
             "upstream_model": up,
             "display_name": slot.get("display_name"),
@@ -943,24 +1028,27 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 self._send_json(400, {"error": {"message": "bad json"}})
                 return
-            try:
-                with open(os.path.join(os.path.expanduser("~"), ".codex", "ogproxy-requests.log"), "a", encoding="utf-8") as lf:
-                    tools = req.get("tools") or []
-                    inp = req.get("input")
-                    n_items = len(inp) if isinstance(inp, list) else 1
-                    types = {}
-                    if isinstance(inp, list):
-                        for it in inp:
-                            t = it.get("type", "?")
-                            types[t] = types.get(t, 0) + 1
-                    lf.write("%s model=%s stream=%s tools=%d items=%d item_types=%s tool_names=%s\n" % (
-                        time.strftime("%Y-%m-%dT%H:%M:%S"),
-                        req.get("model"), req.get("stream"), len(tools), n_items,
-                        json.dumps(types, ensure_ascii=False),
-                        json.dumps([t.get("name") or t.get("type") for t in tools][:40], ensure_ascii=False),
-                    ))
-            except Exception:
-                pass
+            tools = req.get("tools") or []
+            inp = req.get("input")
+            n_items = len(inp) if isinstance(inp, list) else 1
+            types = {}
+            if isinstance(inp, list):
+                for it in inp:
+                    if isinstance(it, dict):
+                        t = it.get("type", "?")
+                        types[t] = types.get(t, 0) + 1
+            _append_debug_log(
+                "ogproxy-requests.log",
+                "%s model=%s stream=%s tools=%d items=%d item_types=%s tool_names=%s" % (
+                    time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    req.get("model"), req.get("stream"), len(tools), n_items,
+                    json.dumps(types, ensure_ascii=False),
+                    json.dumps(
+                        [t.get("name") or t.get("type") for t in tools if isinstance(t, dict)][:40],
+                        ensure_ascii=False,
+                    ),
+                ),
+            )
             chat_req = build_chat_request(req)
             default_slug = "gpt-5.6-sol" if "gpt-5.6-sol" in SLOTS else next(iter(SLOTS))
             model = req.get("model") or default_slug
