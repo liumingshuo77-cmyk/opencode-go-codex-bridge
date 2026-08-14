@@ -42,21 +42,32 @@ try {
         }
     } catch {}
 
-    Write-Step "3/4 写入配置并重启转换代理"
+    Write-Step "3/4 切换模型(热切换,无需重启)"
     Set-OgProxyConfig -UpstreamModel $model -DisplayName $display
-    Stop-OgProxy
-    Start-OgProxy -Key $key
+    if (-not (Invoke-OgProxyHotSwitch -UpstreamModel $model -DisplayName $display)) {
+        # 代理没在运行:先保存配置,再由 go-to-codex 流程启动;这里直接尝试拉起
+        try {
+            $probe = Invoke-RestMethod -Uri "http://127.0.0.1:$($Script:ProxyPort)/v1/models" -TimeoutSec 3
+        } catch {
+            Start-OgProxy -Key $key
+            $null = Invoke-OgProxyHotSwitch -UpstreamModel $model -DisplayName $display
+        }
+    }
+    Update-CodexModelsCache
 
     Write-Step "4/4 验证模型可用"
     $body = @{ model = $Script:CodexModelId; input = "Reply with exactly: OK"; stream = $false } | ConvertTo-Json
-    $r2 = Invoke-RestMethod -Uri "http://127.0.0.1:$($Script:ProxyPort)/v1/responses" -Method Post -Headers @{ "Content-Type" = "application/json" } -Body $body -TimeoutSec 120
-    $text = ($r2.output | Where-Object { $_.type -eq "message" } | ForEach-Object { ($_.content | ForEach-Object { $_.text }) -join "" }) -join ""
-    if ($text -notmatch "OK") { Write-Warn "验证回复异常: $text" } else { Write-Ok "验证通过" }
+    try {
+        $r2 = Invoke-RestMethod -Uri "http://127.0.0.1:$($Script:ProxyPort)/v1/responses" -Method Post -Headers @{ "Content-Type" = "application/json" } -Body $body -TimeoutSec 120
+        $text = ($r2.output | Where-Object { $_.type -eq "message" } | ForEach-Object { ($_.content | ForEach-Object { $_.text }) -join "" }) -join ""
+        if ($text -notmatch "OK") { Write-Warn "验证回复异常: $text" } else { Write-Ok "验证通过" }
+    } catch {
+        Write-Warn "验证调用失败(不影响切换,代理可能仍在启动): $($_.Exception.Message)"
+    }
 
     Write-Host ""
     Write-Host "完成!当前使用模型: $model ($display)" -ForegroundColor Green
-    Write-Host "codex 侧模型名仍为 $($Script:CodexModelId)(保证工具注入),实际请求由代理改写为 $model。" -ForegroundColor DarkGray
-    Write-Host "在桌面端新开聊天即可用上新模型(应用约 3 分钟刷新一次模型注册表)。" -ForegroundColor DarkGray
+    Write-Host "已热切换,无需重启 Codex。新开聊天即可生效;应用模型选择器约 3 分钟内同步显示。" -ForegroundColor DarkGray
 } catch {
     Write-Err $_.Exception.Message
     exit 1

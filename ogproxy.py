@@ -25,8 +25,6 @@ PORT = int(os.environ.get("OPENCODE_GO_PROXY_PORT", "8765"))
 MODELS_CACHE = os.path.join(os.path.expanduser("~"), ".codex", "models_cache.json")
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
-SLUG = os.environ.get("OPENCODE_GO_PROXY_MODEL", "gpt-5.6-sol")
-DISPLAY_NAME = os.environ.get("OPENCODE_GO_PROXY_DISPLAY", "DeepSeek V4 Pro")
 CONTEXT_WINDOW = 200000
 MAX_CONTEXT_WINDOW = 1000000
 MAX_OUTPUT = 64000
@@ -34,33 +32,56 @@ MAX_OUTPUT = 64000
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(SCRIPT_DIR, "ogproxy-config.json")
 
+# 订阅模型挂到 codex 已知模型名上(已知名才有工具注入)。
+# 应用模型选择器会显示这些条目,选中即切换,无需重启。
+DEFAULT_SLOTS = {
+    "gpt-5.6-sol": {"upstream_model": "deepseek-v4-pro", "display_name": "DeepSeek V4 Pro"},
+    "gpt-5.6-terra": {"upstream_model": "deepseek-v4-flash", "display_name": "DeepSeek V4 Flash"},
+    "gpt-5.6-luna": {"upstream_model": "kimi-k3", "display_name": "Kimi K3"},
+    "gpt-5.5": {"upstream_model": "glm-5.2", "display_name": "GLM-5.2"},
+    "gpt-5.4": {"upstream_model": "qwen3.7-plus", "display_name": "Qwen3.7 Plus"},
+    "gpt-5.4-mini": {"upstream_model": "gpt-5.6-luna", "display_name": "GPT-5.6 Luna"},
+    "codex-auto-review": {"upstream_model": "deepseek-v4-pro", "display_name": "DeepSeek V4 Pro (review)"},
+}
+
 
 def load_config():
-    cfg = {
-        "upstream_model": os.environ.get("OPENCODE_GO_PROXY_UPSTREAM_MODEL", "deepseek-v4-pro"),
-        "display_name": os.environ.get("OPENCODE_GO_PROXY_DISPLAY", "DeepSeek V4 Pro"),
-        "codex_model": "gpt-5.6-sol",
-    }
     try:
         with open(CONFIG_PATH, encoding="utf-8") as f:
-            cfg.update(json.load(f))
+            raw = json.load(f)
+    except Exception:
+        raw = {}
+    slots = {}
+    if isinstance(raw.get("slots"), dict):
+        slots = {k: dict(v) for k, v in raw["slots"].items() if isinstance(v, dict)}
+    if not slots:
+        # 兼容旧格式(扁平 upstream_model/display_name)
+        um = raw.get("upstream_model") or os.environ.get("OPENCODE_GO_PROXY_UPSTREAM_MODEL", "deepseek-v4-pro")
+        dn = raw.get("display_name") or os.environ.get("OPENCODE_GO_PROXY_DISPLAY", "DeepSeek V4 Pro")
+        slots = {k: dict(v) for k, v in DEFAULT_SLOTS.items()}
+        slots["gpt-5.6-sol"] = {"upstream_model": um, "display_name": dn}
+    if "gpt-5.6-sol" not in slots:
+        slots["gpt-5.6-sol"] = {"upstream_model": "deepseek-v4-pro", "display_name": "DeepSeek V4 Pro"}
+    return slots
+
+
+SLOTS = load_config()
+
+
+def save_config():
+    try:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump({"slots": SLOTS}, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
-    return cfg
 
 
-CFG = load_config()
-UPSTREAM_MODEL = CFG["upstream_model"]
-DISPLAY_NAME = CFG.get("display_name") or DISPLAY_NAME
-SLUG = CFG.get("codex_model") or SLUG
-
-# codex 只给"已知模型"注入工具。让 codex 用已知模型名发起请求,
-# 代理在上游侧改写为真实模型 ID。gpt-5.6-luna 在订阅里真实存在,直接透传。
-MODEL_MAP = {
-    SLUG: UPSTREAM_MODEL,
-    "gpt-5.6-luna": "gpt-5.6-luna",
-    UPSTREAM_MODEL: UPSTREAM_MODEL,
-}
+# codex 只给"已知模型"注入工具。已知模型名 -> 订阅真实模型 的映射(热切换时更新)。
+MODEL_MAP = {}
+for _cslug, _cfg in SLOTS.items():
+    MODEL_MAP[_cslug] = _cfg["upstream_model"]
+# 兜底:未配置的已知名直接透传
+MODEL_MAP.setdefault("gpt-5.6-sol", "deepseek-v4-pro")
 
 
 def load_template():
@@ -92,10 +113,12 @@ def model_meta_from_cache(model_id):
     return None
 
 
-def build_payload():
-    # codex 只给"已知模型"注入工具,因此用 gpt-5.6-sol 的完整元数据(含全部工具支持),
-    # 只改显示名;实际请求在 build_chat_request 里被改写为真实模型。
-    meta = model_meta_from_cache(UPSTREAM_MODEL) or {}
+def _build_slot_entry(codex_slug, cfg):
+    # codex 只给"已知模型"注入工具,因此 codex 侧 slug 必须是已知名;
+    # 显示名/元数据按槽位对应的真实订阅模型生成,请求在 build_chat_request 里被改写。
+    up = cfg.get("upstream_model") or codex_slug
+    disp = cfg.get("display_name") or codex_slug
+    meta = model_meta_from_cache(up) or {}
     template = load_template()
 
     effort_desc = {
@@ -124,8 +147,8 @@ def build_payload():
     out = min(max(out, 1000), 256000)
 
     entry = {
-        "slug": SLUG,
-        "display_name": DISPLAY_NAME,
+        "slug": codex_slug,
+        "display_name": disp,
         "description": meta.get("description") or "Model from OpenCode Go subscription (routed via proxy)",
         "default_reasoning_level": efforts[0]["effort"],
         "supported_reasoning_levels": efforts,
@@ -165,9 +188,13 @@ def build_payload():
         entry["base_instructions"] = (
             "You are Codex, an agent based on %s. You and the user share one "
             "workspace, and your job is to collaborate with them until their goal is genuinely "
-            "handled. Use tools when appropriate, and keep responses concise." % DISPLAY_NAME
+            "handled. Use tools when appropriate, and keep responses concise." % disp
         )
-    return {"models": [entry]}
+    return entry
+
+
+def build_payload():
+    return {"models": [_build_slot_entry(cslug, cfg) for cslug, cfg in SLOTS.items()]}
 
 
 PAYLOAD = build_payload()
@@ -775,12 +802,50 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         if path.endswith("/models"):
             self._send_json(200, PAYLOAD)
+        elif path.endswith("/current-model"):
+            default = SLOTS.get("gpt-5.6-sol", {})
+            self._send_json(200, {
+                "codex_model": "gpt-5.6-sol",
+                "upstream_model": default.get("upstream_model", "deepseek-v4-pro"),
+                "display_name": default.get("display_name", "DeepSeek V4 Pro"),
+            })
         else:
             self._forward("GET", self.path)
 
+    def do_switch(self, body):
+        global PAYLOAD, MODEL_MAP
+        cslug = body.get("codex_model") or "gpt-5.6-sol"
+        up = body.get("upstream_model")
+        if not up or not isinstance(up, str):
+            self._send_json(400, {"error": {"message": "missing upstream_model"}})
+            return
+        slot = SLOTS.setdefault(cslug, {"upstream_model": up})
+        slot["upstream_model"] = up
+        if body.get("display_name"):
+            slot["display_name"] = body["display_name"]
+        MODEL_MAP[cslug] = up
+        PAYLOAD = build_payload()
+        save_config()
+        sys.stderr.write("[proxy] switched slot %s -> %s\n" % (cslug, up))
+        self._send_json(200, {
+            "ok": True,
+            "codex_model": cslug,
+            "upstream_model": up,
+            "display_name": slot.get("display_name"),
+        })
+
     def do_POST(self):
         path = self.path.split("?")[0]
-        if path.endswith("/responses"):
+        if path.endswith("/switch-model"):
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            raw = self.rfile.read(length) if length else b"{}"
+            try:
+                body = json.loads(raw.decode("utf-8", "replace"))
+            except Exception:
+                self._send_json(400, {"error": {"message": "bad json"}})
+                return
+            self.do_switch(body)
+        elif path.endswith("/responses"):
             length = int(self.headers.get("Content-Length", 0) or 0)
             raw = self.rfile.read(length) if length else b"{}"
             try:
@@ -807,7 +872,8 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
             chat_req = build_chat_request(req)
-            model = req.get("model") or SLUG
+            default_slug = "gpt-5.6-sol" if "gpt-5.6-sol" in SLOTS else next(iter(SLOTS))
+            model = req.get("model") or default_slug
             if chat_req.get("stream"):
                 proxy_chat_stream(self, chat_req, model, req.get("instructions"))
             else:
@@ -823,7 +889,8 @@ def main():
         print("OPENCODE_GO_API_KEY not set", file=sys.stderr)
         sys.exit(1)
     server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-    print("opencode-go proxy listening on 127.0.0.1:%d model=%s" % (PORT, SLUG), file=sys.stderr)
+    sys.stderr.write("opencode-go proxy listening on 127.0.0.1:%d slots=%s\n" % (
+        PORT, ",".join("%s->%s" % (k, v.get("upstream_model")) for k, v in SLOTS.items())))
     server.serve_forever()
 
 

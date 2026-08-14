@@ -233,13 +233,21 @@ function Stop-OgProxy {
 }
 
 function Get-OgProxyConfig {
+    # 返回默认槽位(gpt-5.6-sol)的配置
     $cfg = @{ upstream_model = $Script:UpstreamModelId; display_name = $Script:ModelDisplayName; codex_model = "gpt-5.6-sol" }
     if (Test-Path $Script:ProxyConfigPath) {
         try {
             $saved = Get-Content $Script:ProxyConfigPath -Raw | ConvertFrom-Json
-            if ($saved.upstream_model) { $cfg.upstream_model = $saved.upstream_model }
-            if ($saved.display_name) { $cfg.display_name = $saved.display_name }
-            if ($saved.codex_model) { $cfg.codex_model = $saved.codex_model }
+            if ($saved.slots) {
+                $slot = $saved.slots.PSObject.Properties['gpt-5.6-sol']
+                if ($slot -and $slot.Value) {
+                    if ($slot.Value.upstream_model) { $cfg.upstream_model = $slot.Value.upstream_model }
+                    if ($slot.Value.display_name) { $cfg.display_name = $slot.Value.display_name }
+                }
+            } else {
+                if ($saved.upstream_model) { $cfg.upstream_model = $saved.upstream_model }
+                if ($saved.display_name) { $cfg.display_name = $saved.display_name }
+            }
         } catch {}
     }
     return $cfg
@@ -250,9 +258,67 @@ function Set-OgProxyConfig {
         [Parameter(Mandatory = $true)][string]$UpstreamModel,
         [string]$DisplayName = $UpstreamModel
     )
-    $cfg = @{ upstream_model = $UpstreamModel; display_name = $DisplayName; codex_model = "gpt-5.6-sol" }
-    $cfg | ConvertTo-Json | Set-Content $Script:ProxyConfigPath -Encoding UTF8
+    # 保留已有槽位,只更新默认槽位 gpt-5.6-sol
+    $slots = @{}
+    if (Test-Path $Script:ProxyConfigPath) {
+        try {
+            $saved = Get-Content $Script:ProxyConfigPath -Raw | ConvertFrom-Json
+            if ($saved.slots) {
+                $saved.slots.PSObject.Properties | ForEach-Object {
+                    $slots[$_.Name] = @{ upstream_model = $_.Value.upstream_model; display_name = $_.Value.display_name }
+                }
+            }
+        } catch {}
+    }
+    $slots['gpt-5.6-sol'] = @{ upstream_model = $UpstreamModel; display_name = $DisplayName }
+    $cfg = @{ slots = $slots }
+    $cfg | ConvertTo-Json -Depth 6 | Set-Content $Script:ProxyConfigPath -Encoding UTF8
     Write-Ok "已保存模型配置: $UpstreamModel"
+}
+
+function Invoke-OgProxyHotSwitch {
+    param(
+        [Parameter(Mandatory = $true)][string]$UpstreamModel,
+        [string]$DisplayName = $UpstreamModel,
+        [string]$CodexModel = "gpt-5.6-sol"
+    )
+    # 热切换:代理运行时直接调 /v1/switch-model,无需重启
+    try {
+        $body = @{ codex_model = $CodexModel; upstream_model = $UpstreamModel; display_name = $DisplayName } | ConvertTo-Json
+        $r = Invoke-RestMethod -Uri "http://127.0.0.1:$($Script:ProxyPort)/v1/switch-model" -Method Post -Headers @{ "Content-Type" = "application/json" } -Body $body -TimeoutSec 10
+        Write-Ok "热切换成功: $CodexModel -> $($r.upstream_model)"
+        return $true
+    } catch {
+        Write-Warn "热切换失败(代理未运行?),改用重启方式: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Update-CodexModelsCache {
+    # 立即更新应用的模型缓存显示名,不必等应用刷新
+    $cachePath = Join-Path $Script:CodexHome "models_cache.json"
+    if (-not (Test-Path $cachePath)) { return }
+    try {
+        $cache = Get-Content $cachePath -Raw | ConvertFrom-Json
+        $mapped = @{}
+        if (Test-Path $Script:ProxyConfigPath) {
+            $saved = Get-Content $Script:ProxyConfigPath -Raw | ConvertFrom-Json
+            if ($saved.slots) {
+                $saved.slots.PSObject.Properties | ForEach-Object {
+                    $mapped[$_.Name] = $_.Value.display_name
+                }
+            }
+        }
+        if ($mapped.Count -eq 0) { return }
+        foreach ($m in $cache.models) {
+            if ($mapped.ContainsKey($m.slug)) { $m.display_name = $mapped[$m.slug] }
+        }
+        $out = $cache | ConvertTo-Json -Depth 10
+        [System.IO.File]::WriteAllText($cachePath, $out, (New-Object System.Text.UTF8Encoding($false)))
+        Write-Ok "已同步应用模型缓存显示名"
+    } catch {
+        Write-Warn "同步模型缓存失败(不影响使用): $($_.Exception.Message)"
+    }
 }
 
 function Start-OgProxy {
