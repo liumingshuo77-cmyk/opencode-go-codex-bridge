@@ -728,65 +728,87 @@ def _dump_chat_req(chat_req):
         pass
 
 
-def proxy_chat_stream(self, chat_req, model, instructions):
-    self.send_response(200)
-    self.send_header("Content-Type", "text/event-stream")
-    self.send_header("Cache-Control", "no-cache")
-    self.send_header("Connection", "close")
-    self.end_headers()
-    self.close_connection = True
-    tr = StreamTranslator(self.wfile)
-    tr.start(model, instructions)
-    _dump_chat_req(chat_req)
+def _upstream_open(chat_req, attempts=2, backoff=1.0):
+    """带重试的上游请求(在 SSE 发出之前调用,失败可安全重试)。
+    返回 (resp, err) : resp 为打开的流,err 为最终错误信息。"""
     body = json.dumps(chat_req).encode("utf-8")
     headers = {
         "Authorization": "Bearer " + TOKEN,
         "Content-Type": "application/json",
         "User-Agent": UA,
     }
-    req = urllib.request.Request(UPSTREAM + "/chat/completions", data=body, method="POST", headers=headers)
-    try:
-        resp = urllib.request.urlopen(req, timeout=600)
-        finished = False
-        for raw in resp:
-            line = raw.decode("utf-8", "replace").strip()
-            if not line.startswith("data:"):
-                continue
-            data = line[5:].strip()
-            if data == "[DONE]":
-                break
-            try:
-                obj = json.loads(data)
-            except Exception:
-                continue
-            if tr.feed_chunk(obj):
-                finished = True
-                break
-        if not finished:
-            tr.finish("stop", None)
-    except urllib.error.HTTPError as e:
-        err_body = e.read().decode("utf-8", "replace")
-        tr.resp["status"] = "failed"
-        tr.resp["error"] = {"type": "server_error", "message": "upstream %s: %s" % (e.code, err_body[:500])}
-        tr.emit("response.failed", {"response": tr.resp})
-    except Exception as e:
-        tr.resp["status"] = "failed"
-        tr.resp["error"] = {"type": "server_error", "message": str(e)}
-        tr.emit("response.failed", {"response": tr.resp})
+    last_err = None
+    for attempt in range(attempts):
+        req = urllib.request.Request(UPSTREAM + "/chat/completions", data=body, method="POST", headers=headers)
+        try:
+            return urllib.request.urlopen(req, timeout=600), None
+        except urllib.error.HTTPError as e:
+            err_body = e.read().decode("utf-8", "replace")
+            last_err = (e.code, err_body)
+            sys.stderr.write("[proxy] upstream HTTP %d (attempt %d/%d), retrying...\n" % (e.code, attempt + 1, attempts))
+        except Exception as e:
+            last_err = (0, str(e))
+            sys.stderr.write("[proxy] upstream error (attempt %d/%d): %s, retrying...\n" % (attempt + 1, attempts, e))
+        if attempt < attempts - 1:
+            time.sleep(backoff)
+    return None, last_err
+
+
+def proxy_chat_stream(self, chat_req, model, instructions):
+    _dump_chat_req(chat_req)
+    resp, err = _upstream_open(chat_req)
+    if err is None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+        tr = StreamTranslator(self.wfile)
+        tr.start(model, instructions)
+        try:
+            finished = False
+            for raw in resp:
+                line = raw.decode("utf-8", "replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    obj = json.loads(data)
+                except Exception:
+                    continue
+                if tr.feed_chunk(obj):
+                    finished = True
+                    break
+            if not finished:
+                tr.finish("stop", None)
+        except Exception as e:
+            tr.resp["status"] = "failed"
+            tr.resp["error"] = {"type": "server_error", "message": str(e)}
+            tr.emit("response.failed", {"response": tr.resp})
+        return
+    # 上游请求失败(重试后仍失败):以 502 返回错误
+    code, err_body = err
+    msg = "upstream %s: %s" % (code, (err_body or "")[:500]) if code else str(err_body)
+    self._send_json(code if code else 502, {"error": {"message": msg}})
 
 
 def proxy_chat_nonstream(self, chat_req, model, instructions):
     _dump_chat_req(chat_req)
-    body = json.dumps(chat_req).encode("utf-8")
-    headers = {
-        "Authorization": "Bearer " + TOKEN,
-        "Content-Type": "application/json",
-        "User-Agent": UA,
-    }
-    req = urllib.request.Request(UPSTREAM + "/chat/completions", data=body, method="POST", headers=headers)
+    resp, err = _upstream_open(chat_req)
+    if err is not None:
+        code, err_body = err
+        msg = "upstream %s: %s" % (code, (err_body or "")[:500]) if code else str(err_body)
+        self._send_json(code if code else 502, {"error": {"message": msg}})
+        return
     try:
-        with urllib.request.urlopen(req, timeout=600) as resp:
+        with resp:
             chat = json.loads(resp.read().decode("utf-8", "replace"))
+        # 空响应兜底:choices 为空消息且无完成原因,视为上游异常,给个可读错误让 codex 重试
+        if not chat.get("choices"):
+            raise RuntimeError("upstream returned empty choices")
         out = chat_completion_to_response(chat, model, instructions)
         raw = json.dumps(out, ensure_ascii=False).encode("utf-8")
         self.send_response(200)
@@ -794,9 +816,6 @@ def proxy_chat_nonstream(self, chat_req, model, instructions):
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
-    except urllib.error.HTTPError as e:
-        err_body = e.read().decode("utf-8", "replace")
-        self._send_json(e.code, {"error": {"message": "upstream: " + err_body[:500]}})
     except Exception as e:
         self._send_json(502, {"error": {"message": str(e)}})
 
