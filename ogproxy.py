@@ -44,6 +44,9 @@ DEFAULT_SLOTS = {
     "codex-auto-review": {"upstream_model": "deepseek-v4-pro", "display_name": "DeepSeek V4 Pro (review)"},
 }
 
+# 该网关实测不支持图片的模型(即使元数据声称支持),注册表移除其图片模态,避免应用放行后 400
+GATEWAY_NO_IMAGE = {"qwen3.7-plus", "qwen3.6-plus"}
+
 
 def load_config():
     try:
@@ -121,7 +124,8 @@ def _build_slot_entry(codex_slug, cfg):
     meta = model_meta_from_cache(up) or {}
     template = load_template()
 
-    # 输入模态:从模型元数据读取(text/image/pdf/video -> codex 的 text/image)
+    # 输入模态:从模型元数据读取(text/image/pdf/video -> codex 的 text/image),
+    # 网关实测不支持的模型移除图片模态
     modalities = ["text"]
     for mod in ((meta.get("modalities") or {}).get("input") or []):
         if mod == "text":
@@ -132,6 +136,8 @@ def _build_slot_entry(codex_slug, cfg):
         elif mod == "audio":
             if "audio" not in modalities:
                 modalities.append("audio")
+    if up in GATEWAY_NO_IMAGE and "image" in modalities:
+        modalities.remove("image")
     supports_image = "image" in modalities
 
     effort_desc = {
@@ -251,8 +257,9 @@ def message_content_to_chat(content):
             if not url and p.get("data") and p.get("media_type"):
                 url = "data:%s;base64,%s" % (p.get("media_type"), p.get("data"))
             if url:
-                detail = p.get("detail") or "auto"
-                parts.append({"type": "image_url", "image_url": {"url": url, "detail": detail}})
+                # 注意:image_url 必须是纯字符串。对象形式({"url","detail"})会被
+                # gpt-5.6-luna 上游以空 400 拒绝;kimi-k3 两种都接受。
+                parts.append({"type": "image_url", "image_url": url})
                 has_image = True
             else:
                 # file_id 引用本地解析不了,丢弃
