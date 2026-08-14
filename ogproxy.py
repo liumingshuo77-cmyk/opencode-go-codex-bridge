@@ -121,6 +121,19 @@ def _build_slot_entry(codex_slug, cfg):
     meta = model_meta_from_cache(up) or {}
     template = load_template()
 
+    # 输入模态:从模型元数据读取(text/image/pdf/video -> codex 的 text/image)
+    modalities = ["text"]
+    for mod in ((meta.get("modalities") or {}).get("input") or []):
+        if mod == "text":
+            pass
+        elif mod in ("image", "pdf", "video"):
+            if "image" not in modalities:
+                modalities.append("image")
+        elif mod == "audio":
+            if "audio" not in modalities:
+                modalities.append("audio")
+    supports_image = "image" in modalities
+
     effort_desc = {
         "none": "No reasoning",
         "low": "Fast responses with lighter reasoning",
@@ -167,12 +180,12 @@ def _build_slot_entry(codex_slug, cfg):
         "web_search_tool_type": "text",
         "truncation_policy": {"mode": "tokens", "limit": out},
         "supports_parallel_tool_calls": bool(meta.get("tool_call", True)),
-        "supports_image_detail_original": False,
+        "supports_image_detail_original": supports_image,
         "context_window": ctx,
         "max_context_window": ctx,
         "effective_context_window_percent": 95,
         "experimental_supported_tools": [],
-        "input_modalities": ["text"],
+        "input_modalities": modalities,
         "supports_search_tool": False,
         # 关键:必须是 False。lite 模式下工具以文本塞进 input,deepseek 不会用该文本协议,
         # 会导致永远不调用工具。非 lite 才走原生 tools 数组(deepseek 的函数调用)。
@@ -216,6 +229,41 @@ def message_text_content(content):
     return ""
 
 
+def message_content_to_chat(content):
+    """把 responses 的 content 部分转成 chat 格式。
+    纯文本 -> str;含图片 -> [{type:text}, {type:image_url,...}] 数组。"""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts = []
+    has_image = False
+    for p in content:
+        if isinstance(p, str):
+            parts.append({"type": "text", "text": p})
+        elif not isinstance(p, dict):
+            continue
+        pt = p.get("type")
+        if pt in ("input_text", "output_text", "text"):
+            parts.append({"type": "text", "text": p.get("text", "")})
+        elif pt == "input_image":
+            url = p.get("image_url")
+            if not url and p.get("data") and p.get("media_type"):
+                url = "data:%s;base64,%s" % (p.get("media_type"), p.get("data"))
+            if url:
+                detail = p.get("detail") or "auto"
+                parts.append({"type": "image_url", "image_url": {"url": url, "detail": detail}})
+                has_image = True
+            else:
+                # file_id 引用本地解析不了,丢弃
+                continue
+    if not parts:
+        return ""
+    if not has_image:
+        return "".join(pt.get("text", "") for pt in parts)
+    return parts
+
+
 def responses_input_to_messages(req):
     messages = []
     instructions = req.get("instructions")
@@ -248,9 +296,9 @@ def responses_input_to_messages(req):
             role = item.get("role", "user")
             if role == "developer":
                 role = "system"
-            text = message_text_content(item.get("content"))
-            if text:
-                msg = {"role": role, "content": text}
+            content = message_content_to_chat(item.get("content"))
+            if content:
+                msg = {"role": role, "content": content}
                 if role == "assistant" and pending_reasoning:
                     msg["reasoning_content"] = pending_reasoning
                     pending_reasoning = None
