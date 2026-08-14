@@ -182,6 +182,10 @@ def _build_slot_entry(codex_slug, cfg):
         "default_reasoning_summary": "none",
         "support_verbosity": True,
         "default_verbosity": "medium",
+        # 关键:必须声明插件/应用能力,否则 codex 不会为模型注入浏览器、Chrome、computer-use 等插件工具
+        "include_plugin_usage_instructions": True,
+        "include_apps_usage_instructions": True,
+        "include_skills_usage_instructions": False,
         "apply_patch_tool_type": "freeform",
         "web_search_tool_type": "text",
         "truncation_policy": {"mode": "tokens", "limit": out},
