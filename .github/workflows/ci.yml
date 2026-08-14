@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+        python-version: ["3.9", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Compile proxy
+        run: python -m py_compile ogproxy.py
+      - name: Run regression tests
+        run: python -m unittest discover -s tests -v
+      - name: Validate shell scripts
+        if: runner.os != 'Windows'
+        run: |
+          bash -n ./*.sh ./*.command
+          test -x go-to-codex.sh
+          test -x back-to-chatgpt.sh
+          test -x switch-model.sh
+          test -x go-to-codex.command
+          test -x back-to-chatgpt.command
+          test -x switch-model.command
+      - name: Validate PowerShell scripts
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $failed = $false
+          Get-ChildItem *.ps1 | ForEach-Object {
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) {
+              $errors | Format-List
+              $failed = $true
+            }
+          }
+          if ($failed) { exit 1 }
