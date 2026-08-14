@@ -22,6 +22,7 @@ PROXY_SCRIPT="$SCRIPT_DIR/ogproxy.py"
 PROXY_PORT=8765
 PROXY_PID_FILE="/tmp/ogproxy.pid"
 PROXY_LOG="/tmp/ogproxy.log"
+PROXY_CONFIG="$SCRIPT_DIR/ogproxy-config.json"
 UA="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 
 step() { printf "\033[36m==> %s\033[0m\n" "$1"; }
@@ -288,6 +289,42 @@ stop_ogproxy() {
         kill "$pid" 2>/dev/null && warn "已停止代理(pid $pid)"
         rm -f "$PROXY_PID_FILE"
     fi
+    # 兜底:按脚本名清理残留进程
+    pkill -f "ogproxy\.py" 2>/dev/null
+    sleep 0.6
+}
+
+# ---------- 模型切换配置 ----------
+
+get_ogproxy_config() {
+    local model="$UPSTREAM_MODEL_ID" disp="$MODEL_DISPLAY"
+    if [ -f "$PROXY_CONFIG" ]; then
+        local pair
+        pair=$(python3 -c "
+import json
+try:
+    with open('$PROXY_CONFIG') as f:
+        c = json.load(f)
+    print('%s|%s' % (c.get('upstream_model', ''), c.get('display_name', '')))
+except Exception:
+    print('|')
+")
+        model=$(echo "$pair" | cut -d'|' -f1)
+        disp=$(echo "$pair" | cut -d'|' -f2)
+        [ -z "$model" ] && model="$UPSTREAM_MODEL_ID"
+        [ -z "$disp" ] && disp="$model"
+    fi
+    echo "$model|$disp"
+}
+
+set_ogproxy_config() {
+    local model="$1" disp="${2:-$1}"
+    python3 -c "
+import json
+with open('$PROXY_CONFIG', 'w') as f:
+    json.dump({'upstream_model': '$model', 'display_name': '$disp', 'codex_model': 'gpt-5.6-sol'}, f, ensure_ascii=False, indent=2)
+"
+    ok "已保存模型配置: $model"
 }
 
 # ---------- codex CLI ----------

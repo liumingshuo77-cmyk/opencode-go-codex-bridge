@@ -55,6 +55,8 @@ API key 获取、模型注册、工具启用、联网沙箱、超时回退策略
 
 切回 ChatGPT:运行 **`./back-to-chatgpt.sh`**(或双击 `back-to-chatgpt.command`,保留 provider 配置,可随时切回)。
 
+**自由切换订阅模型**:运行 **`./switch-model.sh`**(或双击 `switch-model.command`),从订阅的全部模型(deepseek-v4-flash、kimi-k3、glm-5.2、gpt-5.6-luna 等 20+)中挑选一个,自动更新代理并验证。codex 侧模型名保持 `gpt-5.6-sol`(保证工具注入),实际请求由代理改写为你选的模型。
+
 ## 文件说明
 
 | 文件 | 作用 |
@@ -65,6 +67,7 @@ API key 获取、模型注册、工具启用、联网沙箱、超时回退策略
 | `common.ps1` | Windows 共享逻辑:key 获取/保存、config.toml 编辑(容错混合行尾)、代理启动/停止/切换 |
 | `go-to-codex.sh` / `.command` | macOS 一键(对应 .bat/.ps1) |
 | `back-to-chatgpt.sh` / `.command` | macOS 切回(对应 .bat/.ps1) |
+| `switch-model.sh` / `.command` | macOS 切换订阅模型(对应 switch-model.bat/.ps1) |
 | `common.sh` | macOS 共享逻辑(对应 common.ps1,bash + 内嵌 python3 编辑 config.toml) |
 | `ogproxy.py` | 本地转换代理:模型注册表 + Responses→Chat 翻译(流式/非流式、工具调用合并、思考内容回传);按 `ogproxy-config.json` 切换上游模型 |
 
