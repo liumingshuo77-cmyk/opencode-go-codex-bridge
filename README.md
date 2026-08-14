@@ -57,7 +57,9 @@ API key 获取、模型注册、工具启用、联网沙箱、超时回退策略
 
 切回 ChatGPT:运行 **`./back-to-chatgpt.sh`**(或双击 `back-to-chatgpt.command`,保留 provider 配置,可随时切回)。
 
-**自由切换订阅模型**:运行 **`./switch-model.sh`**(或双击 `switch-model.command`),从订阅的全部模型(deepseek-v4-flash、kimi-k3、glm-5.2、gpt-5.6-luna 等 20+)中挑选一个,自动更新代理并验证。codex 侧模型名保持 `gpt-5.6-sol`(保证工具注入),实际请求由代理改写为你选的模型。
+**自由切换订阅模型**:运行 **`./switch-model.sh`**(或双击 `switch-model.command`),从订阅的全部模型(deepseek-v4-flash、kimi-k3、glm-5.2、gpt-5.6-luna 等 20+)中挑选一个,**热切换无需重启 Codex**,自动更新代理并验证。
+
+**在应用内直接切换**(Windows / macOS 通用):代理注册表内置了 7 个"已知模型名 → 订阅模型"槽位,Codex 桌面端的模型选择器会直接列出它们(DeepSeek V4 Pro / V4 Flash / Kimi K3 / GLM-5.2 / Qwen3.7 Plus / GPT-5.6 Luna 等)。**在应用里选中即切换,新开聊天立即生效,全程无需重启、无需脚本**。槽位映射可用 `switch-model.bat` / `switch-model.sh` 或编辑 `ogproxy-config.json` 调整。
 
 ## 文件说明
 

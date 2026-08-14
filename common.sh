@@ -296,6 +296,7 @@ stop_ogproxy() {
 
 # ---------- 模型切换配置 ----------
 
+# 读取默认槽位(gpt-5.6-sol)配置,返回 "upstream_model|display_name"
 get_ogproxy_config() {
     local model="$UPSTREAM_MODEL_ID" disp="$MODEL_DISPLAY"
     if [ -f "$PROXY_CONFIG" ]; then
@@ -305,7 +306,8 @@ import json
 try:
     with open('$PROXY_CONFIG') as f:
         c = json.load(f)
-    print('%s|%s' % (c.get('upstream_model', ''), c.get('display_name', '')))
+    s = c.get('slots', {}).get('gpt-5.6-sol', {}) if isinstance(c.get('slots'), dict) else c
+    print('%s|%s' % (s.get('upstream_model', ''), s.get('display_name', '')))
 except Exception:
     print('|')
 ")
@@ -317,14 +319,64 @@ except Exception:
     echo "$model|$disp"
 }
 
+# 更新默认槽位(保留其它槽位映射)
 set_ogproxy_config() {
     local model="$1" disp="${2:-$1}"
     python3 -c "
 import json
+slots = {}
+try:
+    with open('$PROXY_CONFIG') as f:
+        raw = json.load(f)
+    if isinstance(raw.get('slots'), dict):
+        slots = raw['slots']
+except Exception:
+    slots = {}
+slots['gpt-5.6-sol'] = {'upstream_model': '$model', 'display_name': '$disp'}
 with open('$PROXY_CONFIG', 'w') as f:
-    json.dump({'upstream_model': '$model', 'display_name': '$disp', 'codex_model': 'gpt-5.6-sol'}, f, ensure_ascii=False, indent=2)
+    json.dump({'slots': slots}, f, ensure_ascii=False, indent=2)
 "
     ok "已保存模型配置: $model"
+}
+
+# 热切换:代理运行时直接调 /v1/switch-model,无需重启
+hot_switch_ogproxy() {
+    local model="$1" disp="${2:-$1}"
+    local body
+    body=$(printf '{"codex_model": "gpt-5.6-sol", "upstream_model": "%s", "display_name": "%s"}' "$model" "$disp")
+    if curl -sf --max-time 10 -X POST "http://127.0.0.1:$PROXY_PORT/v1/switch-model" \
+        -H "Content-Type: application/json" -d "$body" >/dev/null 2>&1; then
+        ok "热切换成功: gpt-5.6-sol -> $model"
+        return 0
+    fi
+    warn "热切换失败(代理未运行?),改用重启方式"
+    return 1
+}
+
+# 同步应用模型缓存显示名(不必等应用自动刷新)
+sync_models_cache() {
+    python3 -c "
+import json, os
+p = os.path.expanduser('~/.codex/models_cache.json')
+cp = '$PROXY_CONFIG'
+if not os.path.exists(p) or not os.path.exists(cp):
+    raise SystemExit
+with open(cp) as f:
+    cfg = json.load(f)
+slots = cfg.get('slots', {})
+with open(p, encoding='utf-8') as f:
+    cache = json.load(f)
+changed = False
+for m in cache.get('models', []):
+    s = slots.get(m.get('slug'))
+    if s and s.get('display_name') and m.get('display_name') != s['display_name']:
+        m['display_name'] = s['display_name']
+        changed = True
+if changed:
+    with open(p, 'w', encoding='utf-8') as f:
+        json.dump(cache, f, ensure_ascii=False, indent=2)
+    print('    OK: 已同步应用模型缓存显示名')
+" 2>/dev/null || true
 }
 
 # ---------- codex CLI ----------

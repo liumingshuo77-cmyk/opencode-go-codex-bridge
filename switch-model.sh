@@ -79,12 +79,16 @@ except Exception:
         [ -n "$name" ] && disp="$name"
     fi
 
-    step "3/4 写入配置并重启转换代理"
+    step "3/4 切换模型(热切换,无需重启)"
     set_ogproxy_config "$model" "$disp"
-    stop_ogproxy
-    if ! start_ogproxy "$key"; then
-        exit 1
+    if ! hot_switch_ogproxy "$model" "$disp"; then
+        # 代理没在运行:先拉起,再热切换
+        if ! start_ogproxy "$key"; then
+            exit 1
+        fi
+        hot_switch_ogproxy "$model" "$disp" || true
     fi
+    sync_models_cache
 
     step "4/4 验证模型可用"
     local resp text
@@ -107,8 +111,8 @@ except Exception:
 
     echo ""
     printf "\033[32m完成!当前使用模型: %s (%s)\033[0m\n" "$model" "$disp"
-    printf "\033[90mcodex 侧模型名仍为 %s(保证工具注入),实际请求由代理改写为 %s。\033[0m\n" "$CODEX_MODEL_ID" "$model"
-    printf "\033[90m在桌面端新开聊天即可用上新模型(应用约 3 分钟刷新一次模型注册表)。\033[0m\n"
+    printf "\033[90m已热切换,无需重启 Codex。新开聊天即可生效;应用模型选择器约 3 分钟内同步显示。\033[0m\n"
+    printf "\033[90m也可以在应用模型选择器里直接挑选订阅模型(DeepSeek V4 Pro/Flash、Kimi K3、GLM-5.2 等)。\033[0m\n"
 }
 
 main "$@"
