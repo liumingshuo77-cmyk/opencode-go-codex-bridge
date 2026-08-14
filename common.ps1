@@ -321,6 +321,50 @@ function Update-CodexModelsCache {
     }
 }
 
+function Restart-CodexApp {
+    # 应用内存缓存了模型注册表,切回 ChatGPT 后必须重启才能清掉 DS/Kimi 条目
+    Stop-Process -Name "codex" -Force -ErrorAction SilentlyContinue
+    Stop-Process -Name "codex-code-mode-host" -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 3
+    try {
+        $pkg = Get-AppxPackage -Name "OpenAI.Codex" -ErrorAction Stop
+        Start-Process "shell:AppsFolder\$($pkg.PackageFamilyName)!App"
+        Start-Sleep -Seconds 12
+        if (Get-Process -Name "codex" -ErrorAction SilentlyContinue) {
+            Write-Ok "Codex 应用已重启(模型列表已刷新)"
+        } else {
+            Write-Warn "已发出启动指令,请手动打开 Codex 应用"
+        }
+    } catch {
+        Write-Warn "自动重启应用失败,请手动重启 Codex: $($_.Exception.Message)"
+    }
+}
+
+function Reset-CodexModelsCache {
+    # 把模型缓存恢复为官方 8 个模型(防止代理的显示名残留)
+    $cachePath = Join-Path $Script:CodexHome "models_cache.json"
+    if (-not (Test-Path $cachePath)) { return }
+    $cache = Get-Content $cachePath -Raw | ConvertFrom-Json
+    $real = @{
+        "gpt-5.6-sol" = "GPT-5.6-Sol"; "gpt-5.6-sol-wm" = "GPT-5.6-Sol-WM";
+        "gpt-5.6-terra" = "GPT-5.6-Terra"; "gpt-5.6-luna" = "GPT-5.6-Luna";
+        "gpt-5.5" = "GPT-5.5"; "gpt-5.4" = "GPT-5.4"; "gpt-5.4-mini" = "GPT-5.4-Mini";
+        "codex-auto-review" = "Codex Auto Review"
+    }
+    $dirty = $false
+    foreach ($m in $cache.models) {
+        if ($real.ContainsKey($m.slug) -and $real[$m.slug] -ne $m.display_name) {
+            $m.display_name = $real[$m.slug]
+            $dirty = $true
+        }
+    }
+    if ($dirty) {
+        $out = $cache | ConvertTo-Json -Depth 10
+        [System.IO.File]::WriteAllText($cachePath, $out, (New-Object System.Text.UTF8Encoding($false)))
+        Write-Ok "模型缓存已恢复为官方模型名"
+    }
+}
+
 function Start-OgProxy {
     param([Parameter(Mandatory = $true)][string]$Key)
     $uri = "http://127.0.0.1:$($Script:ProxyPort)/v1/models"

@@ -9,6 +9,10 @@ try {
     }
     $timestamp = Backup-CodexFiles
     Set-CodexModel -ModelValue $Script:ChatGptModel -RemoveModelProvider
+    Reset-CodexModelsCache
+
+    Write-Step "重启 Codex 应用以刷新模型列表"
+    Restart-CodexApp
 
     Write-Host ""
     Write-Host "完成!Codex 已切回 $($Script:ChatGptModel)。" -ForegroundColor Green

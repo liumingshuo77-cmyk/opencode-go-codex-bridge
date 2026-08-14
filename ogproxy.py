@@ -196,9 +196,10 @@ def _build_slot_entry(codex_slug, cfg):
         "effective_context_window_percent": 95,
         "experimental_supported_tools": [],
         "input_modalities": modalities,
-        # true 时:1) 激活 tool_search(可搜索发现 node_repl js 等延迟工具,内置浏览器依赖它)
-        # 2) 与真实 gpt-5.6-sol 元数据一致
-        "supports_search_tool": True,
+        # false:插件工具(chrome_extension 等)直接出现在工具列表。
+        # true 会把这些工具变成 Deferred(隐藏,需 tool_search 发现),deepseek 不主动用 tool_search,
+        # 导致模型声称已打开却实际没调用。置 false 让工具直接可见。
+        "supports_search_tool": False,
         # 关键:必须是 False。lite 模式下工具以文本塞进 input,deepseek 不会用该文本协议,
         # 会导致永远不调用工具。非 lite 才走原生 tools 数组(deepseek 的函数调用)。
         "use_responses_lite": False,
@@ -391,6 +392,15 @@ def build_chat_request(req):
         "messages": responses_input_to_messages(req),
         "stream": bool(req.get("stream", True)),
     }
+    # 注入硬性浏览器指令:用户要求打开网页时必须直接调用 chrome_extension,
+    # 不允许拒绝或改用 shell 命令(自定义模型容易在浏览器工具上放弃)。
+    browser_rule = (
+        "【浏览器规则】当用户要求打开网址/网页/链接(如\"打开知乎\"、\"打开 xxx.com\")时,"
+        "你必须立即调用 chrome_extension 工具,在参数中填入目标 url,把当前 Chrome 标签页导航过去。"
+        "禁止用 shell 命令(Start-Process 等)打开网址,禁止说\"无法打开\"或要求用户手动操作,"
+        "工具已可用,直接调用。"
+    )
+    body["messages"].insert(0, {"role": "system", "content": browser_rule})
     tools = []
     for t in (req.get("tools") or []):
         if t.get("type") == "function":
