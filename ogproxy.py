@@ -31,12 +31,35 @@ CONTEXT_WINDOW = 200000
 MAX_CONTEXT_WINDOW = 1000000
 MAX_OUTPUT = 64000
 
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.path.join(SCRIPT_DIR, "ogproxy-config.json")
+
+
+def load_config():
+    cfg = {
+        "upstream_model": os.environ.get("OPENCODE_GO_PROXY_UPSTREAM_MODEL", "deepseek-v4-pro"),
+        "display_name": os.environ.get("OPENCODE_GO_PROXY_DISPLAY", "DeepSeek V4 Pro"),
+        "codex_model": "gpt-5.6-sol",
+    }
+    try:
+        with open(CONFIG_PATH, encoding="utf-8") as f:
+            cfg.update(json.load(f))
+    except Exception:
+        pass
+    return cfg
+
+
+CFG = load_config()
+UPSTREAM_MODEL = CFG["upstream_model"]
+DISPLAY_NAME = CFG.get("display_name") or DISPLAY_NAME
+SLUG = CFG.get("codex_model") or SLUG
+
 # codex 只给"已知模型"注入工具。让 codex 用已知模型名发起请求,
-# 代理在上游侧改写为真实模型 ID。
+# 代理在上游侧改写为真实模型 ID。gpt-5.6-luna 在订阅里真实存在,直接透传。
 MODEL_MAP = {
-    "gpt-5.6-sol": "deepseek-v4-pro",
-    "deepseek-v4-pro": "deepseek-v4-pro",
-    "deepseek-v4-flash": "deepseek-v4-flash",
+    SLUG: UPSTREAM_MODEL,
+    "gpt-5.6-luna": "gpt-5.6-luna",
+    UPSTREAM_MODEL: UPSTREAM_MODEL,
 }
 
 
@@ -53,23 +76,59 @@ def load_template():
     return None
 
 
+def model_meta_from_cache(model_id):
+    # 从 opencode 的 models.json 缓存读取模型的元数据(显示名/推理档/上下文窗口)
+    try:
+        p = os.path.join(os.path.expanduser("~"), ".cache", "opencode", "models.json")
+        with open(p, encoding="utf-8") as f:
+            data = json.load(f)
+        for prov in data.values():
+            if isinstance(prov, dict) and isinstance(prov.get("models"), dict):
+                m = prov["models"].get(model_id)
+                if m:
+                    return m
+    except Exception as e:
+        print("[proxy] meta load failed: %s" % e, file=sys.stderr)
+    return None
+
+
 def build_payload():
     # codex 只给"已知模型"注入工具,因此用 gpt-5.6-sol 的完整元数据(含全部工具支持),
     # 只改显示名;实际请求在 build_chat_request 里被改写为真实模型。
+    meta = model_meta_from_cache(UPSTREAM_MODEL) or {}
     template = load_template()
+
+    effort_desc = {
+        "none": "No reasoning",
+        "low": "Fast responses with lighter reasoning",
+        "medium": "Balances speed and reasoning depth for everyday tasks",
+        "high": "Greater reasoning depth for complex problems",
+        "xhigh": "Extra high reasoning depth for complex problems",
+        "max": "Maximum reasoning depth for the hardest problems",
+        "ultra": "Maximum reasoning with automatic task delegation",
+    }
+    efforts = []
+    for opt in (meta.get("reasoning_options") or []):
+        if opt.get("type") == "effort":
+            for v in opt.get("values", []):
+                if v not in [e["effort"] for e in efforts]:
+                    efforts.append({"effort": v, "description": effort_desc.get(v, v)})
+    if not efforts:
+        efforts = [{"effort": "high", "description": "Greater reasoning depth for complex problems"},
+                   {"effort": "max", "description": "Maximum reasoning depth for the hardest problems"}]
+
+    limit = meta.get("limit") or {}
+    ctx = int(limit.get("context") or CONTEXT_WINDOW)
+    ctx = min(max(ctx, 8000), 1000000)
+    out = int(limit.get("output") or MAX_OUTPUT)
+    out = min(max(out, 1000), 256000)
+
     entry = {
         "slug": SLUG,
         "display_name": DISPLAY_NAME,
-        "description": "Flagship DeepSeek model for coding, reasoning, and agentic work (routed via opencode-go)",
-        "default_reasoning_level": "high",
-        "supported_reasoning_levels": [
-            {"effort": "low", "description": "Fast responses with lighter reasoning"},
-            {"effort": "medium", "description": "Balances speed and reasoning depth for everyday tasks"},
-            {"effort": "high", "description": "Greater reasoning depth for complex problems"},
-            {"effort": "xhigh", "description": "Extra high reasoning depth for complex problems"},
-            {"effort": "max", "description": "Maximum reasoning depth for the hardest problems"},
-            {"effort": "ultra", "description": "Maximum reasoning with automatic task delegation"},
-        ],
+        "description": meta.get("description") or "Model from OpenCode Go subscription (routed via proxy)",
+        "default_reasoning_level": efforts[0]["effort"],
+        "supported_reasoning_levels": efforts,
         "shell_type": "shell_command",
         "visibility": "list",
         "supported_in_api": True,
@@ -83,11 +142,11 @@ def build_payload():
         "default_verbosity": "medium",
         "apply_patch_tool_type": "freeform",
         "web_search_tool_type": "text",
-        "truncation_policy": {"mode": "tokens", "limit": MAX_OUTPUT},
-        "supports_parallel_tool_calls": True,
+        "truncation_policy": {"mode": "tokens", "limit": out},
+        "supports_parallel_tool_calls": bool(meta.get("tool_call", True)),
         "supports_image_detail_original": False,
-        "context_window": CONTEXT_WINDOW,
-        "max_context_window": MAX_CONTEXT_WINDOW,
+        "context_window": ctx,
+        "max_context_window": ctx,
         "effective_context_window_percent": 95,
         "experimental_supported_tools": [],
         "input_modalities": ["text"],
@@ -104,9 +163,9 @@ def build_payload():
         entry["model_messages"] = {"instructions_template": template}
     else:
         entry["base_instructions"] = (
-            "You are Codex, an agent based on DeepSeek V4 Pro. You and the user share one "
+            "You are Codex, an agent based on %s. You and the user share one "
             "workspace, and your job is to collaborate with them until their goal is genuinely "
-            "handled. Use tools when appropriate, and keep responses concise."
+            "handled. Use tools when appropriate, and keep responses concise." % DISPLAY_NAME
         )
     return {"models": [entry]}
 

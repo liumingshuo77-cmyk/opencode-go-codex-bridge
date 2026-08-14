@@ -32,14 +32,17 @@ API key 获取、模型注册、工具启用、联网沙箱、超时回退策略
 
 切回 ChatGPT:双击 **`back-to-chatgpt.bat`**(保留 provider 配置,可随时切回)。
 
+**自由切换订阅模型**:双击 **`switch-model.bat`**,从订阅的全部模型(deepseek-v4-flash、kimi-k3、glm-5.2、gpt-5.6-luna 等 20+)中挑选一个,自动更新代理并验证。codex 侧模型名保持 `gpt-5.6-sol`(保证工具注入),实际请求由代理改写为你选的模型。
+
 ## 文件说明
 
 | 文件 | 作用 |
 |---|---|
 | `go-to-codex.bat` / `.ps1` | 一键:获取 key → 验证订阅 → 启动代理 → 写配置 → CLI 验证 |
 | `back-to-chatgpt.bat` / `.ps1` | 切回 `gpt-5.6-sol`(保留 opencode-go provider 配置) |
-| `common.ps1` | 共享逻辑:key 获取/保存、config.toml 编辑(容错混合行尾)、代理启动 |
-| `ogproxy.py` | 本地转换代理:模型注册表 + Responses→Chat 翻译(流式/非流式、工具调用合并、思考内容回传) |
+| `switch-model.bat` / `.ps1` | 切换订阅模型(菜单选择 → 更新代理 → 验证) |
+| `common.ps1` | 共享逻辑:key 获取/保存、config.toml 编辑(容错混合行尾)、代理启动/停止/切换 |
+| `ogproxy.py` | 本地转换代理:模型注册表 + Responses→Chat 翻译(流式/非流式、工具调用合并、思考内容回传);按 `ogproxy-config.json` 切换上游模型 |
 
 ## 工作原理
 

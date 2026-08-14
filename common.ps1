@@ -15,6 +15,7 @@ $Script:ModelDisplayName = "DeepSeek V4 Pro"
 $Script:ModelCatalogJson = Join-Path $Script:CodexHome "model-catalog.json"
 $Script:ChatGptModel     = "gpt-5.6-sol"
 $Script:ProxyScript      = Join-Path $PSScriptRoot "ogproxy.py"
+$Script:ProxyConfigPath  = Join-Path $PSScriptRoot "ogproxy-config.json"
 $Script:ProxyPort        = 8765
 
 function Write-Step($msg) { Write-Host "==> $msg" -ForegroundColor Cyan }
@@ -222,6 +223,36 @@ function Ensure-CodexProviderTable {
     }
 
     Write-ConfigText -Text $text
+}
+
+function Stop-OgProxy {
+    Get-CimInstance Win32_Process -Filter "Name like 'python%'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -match "ogproxy\.py" } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    Start-Sleep -Milliseconds 600
+}
+
+function Get-OgProxyConfig {
+    $cfg = @{ upstream_model = $Script:UpstreamModelId; display_name = $Script:ModelDisplayName; codex_model = "gpt-5.6-sol" }
+    if (Test-Path $Script:ProxyConfigPath) {
+        try {
+            $saved = Get-Content $Script:ProxyConfigPath -Raw | ConvertFrom-Json
+            if ($saved.upstream_model) { $cfg.upstream_model = $saved.upstream_model }
+            if ($saved.display_name) { $cfg.display_name = $saved.display_name }
+            if ($saved.codex_model) { $cfg.codex_model = $saved.codex_model }
+        } catch {}
+    }
+    return $cfg
+}
+
+function Set-OgProxyConfig {
+    param(
+        [Parameter(Mandatory = $true)][string]$UpstreamModel,
+        [string]$DisplayName = $UpstreamModel
+    )
+    $cfg = @{ upstream_model = $UpstreamModel; display_name = $DisplayName; codex_model = "gpt-5.6-sol" }
+    $cfg | ConvertTo-Json | Set-Content $Script:ProxyConfigPath -Encoding UTF8
+    Write-Ok "已保存模型配置: $UpstreamModel"
 }
 
 function Start-OgProxy {
