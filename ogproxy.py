@@ -196,7 +196,9 @@ def _build_slot_entry(codex_slug, cfg):
         "effective_context_window_percent": 95,
         "experimental_supported_tools": [],
         "input_modalities": modalities,
-        "supports_search_tool": False,
+        # true 时:1) 激活 tool_search(可搜索发现 node_repl js 等延迟工具,内置浏览器依赖它)
+        # 2) 与真实 gpt-5.6-sol 元数据一致
+        "supports_search_tool": True,
         # 关键:必须是 False。lite 模式下工具以文本塞进 input,deepseek 不会用该文本协议,
         # 会导致永远不调用工具。非 lite 才走原生 tools 数组(deepseek 的函数调用)。
         "use_responses_lite": False,

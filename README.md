@@ -88,3 +88,19 @@ API key 获取、模型注册、工具启用、联网沙箱、超时回退策略
 - 沙箱/网络设置对**新聊天**生效
 - **多模态**:支持图片的模型(Kimi K3、GPT-5.6 Luna、Qwen3.7 Plus 等)可在 Codex 中直接发送图片,代理会自动转换;deepseek 系列为纯文本,发送图片时应用会提示更换模型
 - 订阅有速率限制,连续高频请求可能触发上游限流
+
+## 自定义模型的功能可用性
+
+| 功能 | 状态 | 说明 |
+|---|---|---|
+| PowerShell 命令执行 | ✅ | shell_command,联网/git 正常 |
+| 文件编辑 | ✅ | apply_patch |
+| 查看本地图片 | ✅ | view_image |
+| 网络搜索 | ✅ | web_search |
+| 目标/规划/协作 | ✅ | goals、update_plan、request_user_input 等 |
+| Chrome 浏览器控制 | ✅ | chrome_extension,打开网页/导航/交互 |
+| 图片上传(多模态模型) | ✅ | Kimi K3 / GPT-5.6 Luna / Qwen 系列 |
+| 图片上传(deepseek 系列) | ❌ | 纯文本模型,应用会提示更换模型 |
+| **内置浏览器(in-app browser)** | ❌ | 依赖 `mcp__node_repl__js`,该工具被 Codex 桌面应用按官方 Browser 技能门控,自定义 provider 无法获得 → **请用 Chrome 插件替代,效果相同** |
+
+> 内置浏览器对自定义模型是应用层锁死(已确认无配置途径可解);Chrome 插件是完全可用的替代浏览器方案。
